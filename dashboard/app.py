@@ -20,6 +20,7 @@ from db.database import (
 )
 from main import run_analysis
 from strategy.backtester import run_backtest
+from strategy.diagnostics import build_diagnostics
 
 
 st.set_page_config(page_title="t212-signal-lab", layout="wide")
@@ -232,6 +233,9 @@ if st.sidebar.button("RUN BACKTEST", use_container_width=True):
 
 latest_run = session.query(Run).order_by(Run.timestamp.desc()).first()
 latest_backtest = session.query(BacktestRun).order_by(BacktestRun.timestamp.desc()).first()
+trades_df = pd.DataFrame()
+equity_df = pd.DataFrame()
+rejected_df = pd.DataFrame()
 
 st.markdown("## SYSTEM")
 if latest_run:
@@ -333,7 +337,6 @@ if latest_backtest:
         session.query(BacktestTrade)
         .filter(BacktestTrade.run_id == latest_backtest.id)
         .order_by(BacktestTrade.signal_date.desc())
-        .limit(80)
         .all()
     )
     if trades:
@@ -351,6 +354,8 @@ if latest_backtest:
                     "PNL": round(t.pnl, 2),
                     "HOLD": t.holding_days,
                     "SCORE": round(t.final_score, 2),
+                    "ENTRY_VALUE": t.entry_value,
+                    "EXIT_VALUE": t.exit_value,
                 }
                 for t in trades
             ]
@@ -361,7 +366,6 @@ if latest_backtest:
         session.query(BacktestRejectedTrade)
         .filter(BacktestRejectedTrade.run_id == latest_backtest.id)
         .order_by(BacktestRejectedTrade.signal_date.desc())
-        .limit(80)
         .all()
     )
     if rejected:
@@ -379,6 +383,95 @@ if latest_backtest:
             ]
         )
         st.dataframe(rejected_df, use_container_width=True, hide_index=True)
+
+    if not trades_df.empty or not equity_df.empty:
+        diagnostic_trades = trades_df.rename(
+            columns={
+                "SIG_DATE": "signal_date",
+                "TICKER": "ticker",
+                "REGIME": "market_regime",
+                "ENTRY": "entry_date",
+                "EXIT": "exit_date",
+                "REASON": "exit_reason",
+                "RET_%": "return_pct",
+                "PNL": "pnl",
+                "HOLD": "holding_days",
+                "SCORE": "final_score",
+            }
+        )
+        diagnostic_equity = equity_df.rename(
+            columns={
+                "DATE": "date",
+                "EQUITY": "equity",
+                "DRAWDOWN_%": "drawdown_pct",
+                "CASH": "cash",
+                "OPEN_POSITIONS": "open_positions",
+                "DAILY_RETURN_%": "daily_return",
+            }
+        )
+        if "positions_value" not in diagnostic_equity and equity_rows:
+            diagnostic_equity["positions_value"] = [row.positions_value for row in equity_rows]
+        diagnostic_rejected = rejected_df.rename(
+            columns={
+                "SIG_DATE": "signal_date",
+                "TICKER": "ticker",
+                "ACTION": "action",
+                "REASON": "reason",
+                "SCORE": "final_score",
+            }
+        )
+        diagnostics = build_diagnostics(diagnostic_trades, diagnostic_equity, diagnostic_rejected)
+
+        st.markdown("## STRATEGY DIAGNOSTICS")
+        rec = diagnostics["recommendations"]
+        st.markdown(
+            "<div class='terminal-panel'>"
+            f"<p class='terminal-line'>> TICKERS_TO_REMOVE: {', '.join(rec['tickers_to_remove']) or 'NONE'}</p>"
+            f"<p class='terminal-line'>> REGIMES_TO_AVOID: {', '.join(rec['regimes_to_avoid']) or 'NONE'}</p>"
+            f"<p class='terminal-line'>> SCORE_MIN_RECOMMENDED: {format_num(rec['score_minimum_recommended']) if rec['score_minimum_recommended'] is not None else 'N/A'}</p>"
+            f"<p class='terminal-line'>> MAX_HOLDING_IDEAL: {rec['max_holding_ideal'] if rec['max_holding_ideal'] is not None else 'N/A'}</p>"
+            f"<p class='terminal-line'>> FILTERS_IMPROVING_SHARPE_CAGR: {' | '.join(rec['filters']) or 'NONE FOUND'}</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        exposure = diagnostics["exposure"]
+        cols = st.columns(5)
+        cols[0].metric("AVG_EXPOSURE", format_pct(exposure["average_portfolio_exposure"]))
+        cols[1].metric("MAX_EXPOSURE", format_pct(exposure["max_exposure"]))
+        cols[2].metric("AVG_CASH", format_pct(exposure["average_cash_pct"]))
+        cols[3].metric("TIME_IN_MARKET", format_pct(exposure["time_in_market"]))
+        cols[4].metric("AVG_OPEN_POS", format_num(exposure["average_open_positions"]))
+
+        st.markdown("## PERFORMANCE BY TICKER")
+        by_ticker = diagnostics["by_ticker"]
+        if not by_ticker.empty:
+            st.dataframe(by_ticker, use_container_width=True, hide_index=True)
+            st.bar_chart(by_ticker.set_index("ticker")[["total_pnl", "expectancy"]], use_container_width=True)
+
+        st.markdown("## PERFORMANCE BY MARKET_REGIME")
+        by_regime = diagnostics["by_regime"]
+        st.dataframe(by_regime, use_container_width=True, hide_index=True)
+        if not by_regime.empty:
+            st.bar_chart(by_regime.set_index("market_regime")[["total_pnl", "expectancy"]], use_container_width=True)
+
+        st.markdown("## PERFORMANCE BY YEAR")
+        by_year = diagnostics["by_year"]
+        st.dataframe(by_year, use_container_width=True, hide_index=True)
+        if not by_year.empty:
+            st.bar_chart(by_year.set_index("year")[["total_return", "max_drawdown"]], use_container_width=True)
+
+        st.markdown("## PERFORMANCE BY EXIT_REASON")
+        by_exit = diagnostics["by_exit_reason"]
+        st.dataframe(by_exit, use_container_width=True, hide_index=True)
+        if not by_exit.empty:
+            st.bar_chart(by_exit.set_index("reason")[["total_pnl", "expectancy", "rejected"]], use_container_width=True)
+
+        st.markdown("## PERFORMANCE BY SCORE BUCKET")
+        by_score = diagnostics["by_score_bucket"]
+        st.dataframe(by_score, use_container_width=True, hide_index=True)
+        if not by_score.empty:
+            st.bar_chart(by_score.set_index("score_bucket")[["total_pnl", "expectancy"]], use_container_width=True)
 else:
     st.markdown(
         "<div class='terminal-panel'><p class='terminal-line'>> BACKTEST: EMPTY</p></div>",
