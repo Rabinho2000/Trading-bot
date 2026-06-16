@@ -1,0 +1,13 @@
+pandas
+numpy
+requests
+pydantic
+python-dotenv
+yfinance
+streamlit
+apscheduler
+pytest
+sqlalchemy
+openai
+python-telegram-bot
+plotly
