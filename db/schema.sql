@@ -55,3 +55,40 @@ CREATE TABLE IF NOT EXISTS positions_simulated (
     exit_price REAL,
     pnl REAL
 );
+
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    start_date TEXT,
+    end_date TEXT,
+    watchlist TEXT,
+    total_trades INTEGER,
+    win_rate REAL,
+    average_win REAL,
+    average_loss REAL,
+    profit_factor REAL,
+    expectancy REAL,
+    average_return REAL,
+    max_drawdown REAL,
+    spy_return REAL
+);
+
+CREATE TABLE IF NOT EXISTS backtest_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER,
+    signal_id TEXT,
+    signal_date TEXT,
+    ticker TEXT,
+    market_regime TEXT,
+    entry_date TEXT,
+    entry_price REAL,
+    exit_date TEXT,
+    exit_price REAL,
+    exit_reason TEXT,
+    return_pct REAL,
+    pnl REAL,
+    technical_score REAL,
+    regime_score REAL,
+    final_score REAL,
+    FOREIGN KEY(run_id) REFERENCES backtest_runs(id)
+);

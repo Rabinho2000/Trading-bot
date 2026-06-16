@@ -64,6 +64,44 @@ class PositionSimulated(Base):
     exit_price = Column(Float, nullable=True)
     pnl = Column(Float, nullable=True)
 
+class BacktestRun(Base):
+    __tablename__ = 'backtest_runs'
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    start_date = Column(String)
+    end_date = Column(String)
+    watchlist = Column(String)
+    total_trades = Column(Integer, default=0)
+    win_rate = Column(Float, default=0.0)
+    average_win = Column(Float, default=0.0)
+    average_loss = Column(Float, default=0.0)
+    profit_factor = Column(Float, default=0.0)
+    expectancy = Column(Float, default=0.0)
+    average_return = Column(Float, default=0.0)
+    max_drawdown = Column(Float, default=0.0)
+    spy_return = Column(Float, default=0.0)
+    trades = relationship("BacktestTrade", back_populates="run")
+
+class BacktestTrade(Base):
+    __tablename__ = 'backtest_trades'
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey('backtest_runs.id'))
+    signal_id = Column(String)
+    signal_date = Column(String)
+    ticker = Column(String)
+    market_regime = Column(String)
+    entry_date = Column(String)
+    entry_price = Column(Float)
+    exit_date = Column(String)
+    exit_price = Column(Float)
+    exit_reason = Column(String)
+    return_pct = Column(Float)
+    pnl = Column(Float)
+    technical_score = Column(Float)
+    regime_score = Column(Float)
+    final_score = Column(Float)
+    run = relationship("BacktestRun", back_populates="trades")
+
 def init_db():
     from sqlalchemy import create_engine
     engine = create_engine(config.DATABASE_URL)

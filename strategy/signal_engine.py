@@ -2,18 +2,25 @@ import hashlib
 from datetime import datetime
 from .scoring import calculate_technical_score, calculate_final_score
 
-def generate_signal(ticker, df, regime):
+def generate_signal(ticker, df, regime, as_of_date=None):
     if df is None or df.empty:
         return None
     
-    last_row = df.iloc[-1]
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    if as_of_date is not None:
+        scoped_df = df.loc[:as_of_date]
+        if scoped_df.empty:
+            return None
+    else:
+        scoped_df = df
+
+    last_row = scoped_df.iloc[-1]
+    if as_of_date is not None:
+        date_str = last_row.name.strftime("%Y-%m-%d")
+    else:
+        date_str = datetime.now().strftime("%Y-%m-%d")
     
     tech_score = calculate_technical_score(last_row)
     final_score, regime_score = calculate_final_score(tech_score, regime)
-    
-    # Deterministic ID
-    signal_id = hashlib.md5(f"{date_str}_{ticker}_{final_score}".encode()).hexdigest()[:12]
     
     # Decision logic
     action = "SKIP"
@@ -50,6 +57,9 @@ def generate_signal(ticker, df, regime):
         risk_rating = "HIGH"
     elif last_row['Vol_20D'] > 15:
         risk_rating = "MEDIUM"
+
+    # Deterministic ID based on stable signal identity, not the score.
+    signal_id = hashlib.md5(f"{date_str}_{ticker}_{action}".encode()).hexdigest()[:12]
 
     return {
         "signal_id": signal_id,

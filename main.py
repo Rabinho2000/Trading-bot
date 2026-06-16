@@ -5,6 +5,7 @@ from data.market_data import fetch_data, get_latest_price
 from strategy.indicators import calculate_indicators
 from strategy.regime import classify_market_regime
 from strategy.signal_engine import generate_signal
+from strategy.backtester import run_backtest
 from risk.risk_manager import validate_signal_risk
 from ai.analyst import get_ai_analysis
 from alerts.telegram import send_telegram_message, format_daily_summary
@@ -143,7 +144,10 @@ def list_signals():
 
 def main():
     parser = argparse.ArgumentParser(description="t212-signal-lab CLI")
-    parser.add_argument("command", choices=["run", "signals", "evaluate", "telegram-test"])
+    parser.add_argument("command", choices=["run", "signals", "evaluate", "telegram-test", "backtest"])
+    parser.add_argument("--start", help="Backtest start date, YYYY-MM-DD")
+    parser.add_argument("--end", help="Backtest end date, YYYY-MM-DD")
+    parser.add_argument("--max-holding-days", type=int, default=30, help="Maximum holding period for backtests")
     
     args = parser.parse_args()
     
@@ -156,6 +160,23 @@ def main():
     elif args.command == "telegram-test":
         send_telegram_message("Test message from t212-signal-lab")
         print("Test message sent.")
+    elif args.command == "backtest":
+        if not args.start or not args.end:
+            parser.error("backtest requires --start and --end")
+
+        result = run_backtest(args.start, args.end, max_holding_days=args.max_holding_days)
+        metrics = result.metrics
+        print(f"Backtest run #{result.run_id} saved.")
+        print(f"Trades: {metrics['total_trades']}")
+        print(f"Win rate: {metrics['win_rate']:.2f}%")
+        print(f"Average return: {metrics['average_return']:.2f}%")
+        print(f"Profit factor: {metrics['profit_factor']:.2f}")
+        print(f"Max drawdown: {metrics['max_drawdown']:.2f}%")
+        print(f"Return vs SPY: {metrics['average_return']:.2f}% vs {metrics['spy_return']:.2f}%")
+        if result.failed_tickers:
+            print("Tickers skipped:")
+            for ticker, reason in result.failed_tickers.items():
+                print(f"- {ticker}: {reason}")
 
 if __name__ == "__main__":
     main()
