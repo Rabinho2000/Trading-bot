@@ -62,7 +62,16 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     start_date TEXT,
     end_date TEXT,
     watchlist TEXT,
+    initial_capital REAL,
+    final_equity REAL,
+    total_return REAL,
+    cagr REAL,
+    sharpe REAL,
+    sortino REAL,
+    calmar REAL,
     total_trades INTEGER,
+    generated_signals INTEGER,
+    rejected_trades INTEGER,
     win_rate REAL,
     average_win REAL,
     average_loss REAL,
@@ -70,7 +79,17 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     expectancy REAL,
     average_return REAL,
     max_drawdown REAL,
-    spy_return REAL
+    max_drawdown_value REAL,
+    spy_return REAL,
+    benchmark_return REAL,
+    alpha_vs_spy REAL,
+    avg_holding_days REAL,
+    max_concurrent_positions INTEGER,
+    max_positions_total INTEGER,
+    max_position_pct REAL,
+    spread_slippage_pct REAL,
+    currency_conversion_pct REAL,
+    bankrupt INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS backtest_trades (
@@ -89,6 +108,36 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     pnl REAL,
     technical_score REAL,
     regime_score REAL,
+    final_score REAL,
+    holding_days INTEGER,
+    position_size REAL,
+    entry_value REAL,
+    exit_value REAL,
+    FOREIGN KEY(run_id) REFERENCES backtest_runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS backtest_equity_curve (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER,
+    date TEXT,
+    cash REAL,
+    positions_value REAL,
+    equity REAL,
+    drawdown_value REAL,
+    drawdown_pct REAL,
+    open_positions INTEGER,
+    daily_return REAL,
+    FOREIGN KEY(run_id) REFERENCES backtest_runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS backtest_rejected_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER,
+    signal_id TEXT,
+    signal_date TEXT,
+    ticker TEXT,
+    action TEXT,
+    reason TEXT,
     final_score REAL,
     FOREIGN KEY(run_id) REFERENCES backtest_runs(id)
 );

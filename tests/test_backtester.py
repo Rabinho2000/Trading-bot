@@ -1,83 +1,146 @@
 import pandas as pd
 
-from strategy.backtester import calculate_metrics, simulate_trade
+from strategy import backtester
+from strategy.backtester import (
+    BacktestConfig,
+    calculate_equity_drawdowns,
+    calculate_metrics,
+    calculate_trade_stats,
+    simulate_portfolio,
+)
 from strategy.indicators import calculate_indicators
 from strategy.signal_engine import generate_signal
 
 
-def make_signal(**overrides):
-    signal = {
-        "signal_id": "abc123",
-        "date": "2020-01-02",
-        "ticker": "ABC",
-        "market_regime": "RISK_ON",
-        "invalidation": 95.0,
-        "target_1": 110.0,
-        "technical_score": 0.8,
-        "regime_score": 1.2,
-        "final_score": 0.96,
-    }
-    signal.update(overrides)
-    return signal
+def test_drawdown_uses_equity_curve_not_trade_multiplication():
+    drawdowns, max_dd_value, max_dd_pct = calculate_equity_drawdowns([10000, 12000, 9000, 11000])
+
+    assert drawdowns[2] == (-3000, -25.0)
+    assert max_dd_value == -3000
+    assert max_dd_pct == -25.0
 
 
-def test_simulate_trade_enters_next_open_and_hits_target():
-    dates = pd.to_datetime(["2020-01-02", "2020-01-03", "2020-01-06"])
-    df = pd.DataFrame(
+def test_profit_factor_and_expectancy_are_trade_based():
+    stats = calculate_trade_stats(
+        [
+            {"return_pct": 10.0, "holding_days": 5},
+            {"return_pct": -5.0, "holding_days": 3},
+            {"return_pct": 2.5, "holding_days": 2},
+        ]
+    )
+
+    assert stats["total_trades"] == 3
+    assert round(stats["win_rate"], 2) == 66.67
+    assert stats["profit_factor"] == 2.5
+    assert stats["expectancy"] == 2.5
+    assert round(stats["avg_holding_days"], 2) == 3.33
+
+
+def test_calculate_metrics_uses_daily_equity_for_return_and_drawdown():
+    equity_curve = [
         {
-            "Open": [100.0, 101.0, 105.0],
-            "High": [102.0, 109.0, 111.0],
-            "Low": [99.0, 100.0, 104.0],
-            "Close": [101.0, 108.0, 110.0],
+            "date": "2020-01-01",
+            "equity": 10000,
+            "drawdown_value": 0,
+            "drawdown_pct": 0,
+            "daily_return": 0,
+        },
+        {
+            "date": "2020-01-02",
+            "equity": 12000,
+            "drawdown_value": 0,
+            "drawdown_pct": 0,
+            "daily_return": 20,
+        },
+        {
+            "date": "2020-01-03",
+            "equity": 9000,
+            "drawdown_value": -3000,
+            "drawdown_pct": -25,
+            "daily_return": -25,
+        },
+    ]
+    spy = pd.DataFrame(
+        {"Close": [100.0, 110.0]},
+        index=pd.to_datetime(["2020-01-01", "2020-01-03"]),
+    )
+
+    metrics = calculate_metrics(
+        [{"return_pct": -10.0, "holding_days": 2}],
+        equity_curve,
+        spy,
+        "2020-01-01",
+        "2020-01-03",
+        10000,
+    )
+
+    assert round(metrics["total_return"], 2) == -10.0
+    assert metrics["max_drawdown"] == -25
+    assert metrics["max_drawdown_value"] == -3000
+    assert round(metrics["spy_return"], 2) == 10.0
+    assert round(metrics["alpha_vs_spy"], 2) == -20.0
+
+
+def test_simulate_portfolio_builds_daily_equity_and_closed_trades(monkeypatch):
+    dates = pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"])
+    abc = pd.DataFrame(
+        {
+            "Open": [100.0, 100.0, 100.0],
+            "High": [101.0, 101.0, 112.0],
+            "Low": [99.0, 99.0, 99.0],
+            "Close": [100.0, 100.0, 110.0],
             "Volume": [1000, 1000, 1000],
         },
         index=dates,
     )
+    market = {"ABC": abc, "SPY": abc.copy(), "QQQ": abc.copy()}
 
-    trade = simulate_trade(make_signal(), df, dates[0], max_holding_days=30)
+    def fake_complete(_df):
+        return True
 
-    assert trade["entry_date"] == "2020-01-03"
-    assert trade["entry_price"] == 101.0
-    assert trade["exit_date"] == "2020-01-06"
-    assert trade["exit_reason"] == "TARGET_1"
-    assert round(trade["return_pct"], 4) == round((110.0 / 101.0 - 1) * 100, 4)
+    def fake_regime(_market):
+        return "RISK_ON"
 
+    def fake_signal(ticker, _df, _regime, as_of_date=None):
+        if ticker != "ABC" or as_of_date != dates[0]:
+            return None
+        return {
+            "signal_id": "abc-buy",
+            "date": "2020-01-01",
+            "ticker": "ABC",
+            "action": "BUY",
+            "invalidation": 95.0,
+            "target_1": 110.0,
+            "technical_score": 0.8,
+            "regime_score": 1.2,
+            "final_score": 0.96,
+        }
 
-def test_simulate_trade_uses_stop_first_when_stop_and_target_same_day():
-    dates = pd.to_datetime(["2020-01-02", "2020-01-03"])
-    df = pd.DataFrame(
-        {
-            "Open": [100.0, 101.0],
-            "High": [102.0, 111.0],
-            "Low": [99.0, 94.0],
-            "Close": [101.0, 108.0],
-            "Volume": [1000, 1000],
-        },
-        index=dates,
+    monkeypatch.setattr(backtester, "has_complete_signal_data", fake_complete)
+    monkeypatch.setattr(backtester, "classify_market_regime", fake_regime)
+    monkeypatch.setattr(backtester, "generate_signal", fake_signal)
+
+    result = simulate_portfolio(
+        market,
+        dates[0],
+        dates[-1],
+        BacktestConfig(
+            initial_capital=10000,
+            max_holding_days=30,
+            max_positions_total=1,
+            max_position_pct=0.5,
+            spread_slippage_pct=0.0,
+            currency_conversion_pct=0.0,
+        ),
     )
 
-    trade = simulate_trade(make_signal(), df, dates[0], max_holding_days=30)
-
-    assert trade["exit_reason"] == "STOP"
-    assert trade["exit_price"] == 95.0
-
-
-def test_calculate_metrics_includes_spy_return_and_drawdown():
-    spy = pd.DataFrame(
-        {"Close": [100.0, 110.0]},
-        index=pd.to_datetime(["2020-01-01", "2020-01-31"]),
-    )
-    trades = [{"return_pct": 10.0}, {"return_pct": -5.0}, {"return_pct": 5.0}]
-
-    metrics = calculate_metrics(trades, spy, "2020-01-01", "2020-01-31")
-
-    assert metrics["total_trades"] == 3
-    assert round(metrics["win_rate"], 2) == 66.67
-    assert metrics["average_win"] == 7.5
-    assert metrics["average_loss"] == -5.0
-    assert metrics["profit_factor"] == 3.0
-    assert round(metrics["spy_return"], 2) == 10.0
-    assert metrics["max_drawdown"] < 0
+    assert len(result["equity_curve"]) == 3
+    assert len(result["trades"]) == 1
+    assert result["trades"][0]["entry_date"] == "2020-01-02"
+    assert result["trades"][0]["exit_date"] == "2020-01-03"
+    assert result["trades"][0]["exit_reason"] == "TARGET_1"
+    assert result["equity_curve"][-1]["equity"] == 10500.0
+    assert result["max_concurrent_positions"] == 1
 
 
 def test_generate_signal_as_of_date_ignores_future_rows():

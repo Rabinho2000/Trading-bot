@@ -148,6 +148,11 @@ def main():
     parser.add_argument("--start", help="Backtest start date, YYYY-MM-DD")
     parser.add_argument("--end", help="Backtest end date, YYYY-MM-DD")
     parser.add_argument("--max-holding-days", type=int, default=30, help="Maximum holding period for backtests")
+    parser.add_argument("--initial-capital", type=float, default=10000.0, help="Initial backtest capital")
+    parser.add_argument("--max-positions-total", type=int, default=5, help="Maximum concurrent backtest positions")
+    parser.add_argument("--max-position-pct", type=float, default=0.20, help="Maximum capital fraction per position")
+    parser.add_argument("--spread-slippage-pct", type=float, default=0.001, help="Per-side spread/slippage fraction")
+    parser.add_argument("--currency-conversion-pct", type=float, default=0.0, help="Per-side currency conversion fraction")
     
     args = parser.parse_args()
     
@@ -164,15 +169,34 @@ def main():
         if not args.start or not args.end:
             parser.error("backtest requires --start and --end")
 
-        result = run_backtest(args.start, args.end, max_holding_days=args.max_holding_days)
+        result = run_backtest(
+            args.start,
+            args.end,
+            max_holding_days=args.max_holding_days,
+            initial_capital=args.initial_capital,
+            max_positions_total=args.max_positions_total,
+            max_position_pct=args.max_position_pct,
+            spread_slippage_pct=args.spread_slippage_pct,
+            currency_conversion_pct=args.currency_conversion_pct,
+        )
         metrics = result.metrics
         print(f"Backtest run #{result.run_id} saved.")
-        print(f"Trades: {metrics['total_trades']}")
+        print(f"Signals generated: {metrics['generated_signals']}")
+        print(f"Trades closed: {metrics['total_trades']}")
+        print(f"Rejected trades: {metrics['rejected_trades']}")
+        print(f"Final equity: {metrics['final_equity']:.2f}")
+        print(f"Strategy return: {metrics['total_return']:.2f}%")
+        print(f"CAGR: {metrics['cagr']:.2f}%")
+        print(f"Sharpe: {metrics['sharpe']:.2f}")
+        print(f"Sortino: {metrics['sortino']:.2f}")
+        print(f"Calmar: {metrics['calmar']:.2f}")
         print(f"Win rate: {metrics['win_rate']:.2f}%")
         print(f"Average return: {metrics['average_return']:.2f}%")
         print(f"Profit factor: {metrics['profit_factor']:.2f}")
-        print(f"Max drawdown: {metrics['max_drawdown']:.2f}%")
-        print(f"Return vs SPY: {metrics['average_return']:.2f}% vs {metrics['spy_return']:.2f}%")
+        print(f"Max drawdown: {metrics['max_drawdown']:.2f}% ({metrics['max_drawdown_value']:.2f})")
+        print(f"Return vs SPY: {metrics['total_return']:.2f}% vs {metrics['spy_return']:.2f}%")
+        if metrics["bankrupt"]:
+            print("ALERT: strategy bankrupt")
         if result.failed_tickers:
             print("Tickers skipped:")
             for ticker, reason in result.failed_tickers.items():

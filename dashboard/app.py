@@ -8,7 +8,16 @@ import streamlit as st
 # Add parent dir to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from db.database import BacktestRun, BacktestTrade, Run, Signal, get_session, init_db
+from db.database import (
+    BacktestEquityCurve,
+    BacktestRejectedTrade,
+    BacktestRun,
+    BacktestTrade,
+    Run,
+    Signal,
+    get_session,
+    init_db,
+)
 from main import run_analysis
 from strategy.backtester import run_backtest
 
@@ -124,6 +133,15 @@ code, pre {
 .status-skip {
     color: var(--terminal-red);
 }
+
+.bankrupt-alert {
+    background: rgba(255, 77, 109, 0.18);
+    border: 1px solid var(--terminal-red);
+    color: var(--terminal-red);
+    padding: 0.85rem 1rem;
+    margin-bottom: 1rem;
+    text-transform: uppercase;
+}
 </style>
 """
 
@@ -181,7 +199,12 @@ if st.sidebar.button("RUN SIGNALS", use_container_width=True):
 st.sidebar.markdown("## BACKTEST CONTROL")
 bt_start = st.sidebar.date_input("START", value=date(2015, 1, 1))
 bt_end = st.sidebar.date_input("END", value=date(2025, 12, 31))
+bt_initial_capital = st.sidebar.number_input("CAPITAL", min_value=100.0, value=10000.0, step=500.0)
 bt_max_days = st.sidebar.number_input("MAX_HOLD", min_value=1, max_value=252, value=30, step=1)
+bt_max_positions = st.sidebar.number_input("MAX_POSITIONS", min_value=1, max_value=50, value=5, step=1)
+bt_position_pct = st.sidebar.number_input("MAX_POS_PCT", min_value=0.01, max_value=1.0, value=0.20, step=0.01)
+bt_slippage = st.sidebar.number_input("SPREAD_SLIPPAGE", min_value=0.0, max_value=0.10, value=0.001, step=0.001, format="%.4f")
+bt_fx = st.sidebar.number_input("FX_COST", min_value=0.0, max_value=0.10, value=0.0, step=0.001, format="%.4f")
 
 if st.sidebar.button("RUN BACKTEST", use_container_width=True):
     if bt_start >= bt_end:
@@ -193,6 +216,11 @@ if st.sidebar.button("RUN BACKTEST", use_container_width=True):
                     bt_start.strftime("%Y-%m-%d"),
                     bt_end.strftime("%Y-%m-%d"),
                     max_holding_days=int(bt_max_days),
+                    initial_capital=float(bt_initial_capital),
+                    max_positions_total=int(bt_max_positions),
+                    max_position_pct=float(bt_position_pct),
+                    spread_slippage_pct=float(bt_slippage),
+                    currency_conversion_pct=float(bt_fx),
                 )
                 st.sidebar.success(f"RUN #{result.run_id} SAVED")
                 if result.failed_tickers:
@@ -222,26 +250,84 @@ else:
 
 st.markdown("## BACKTEST")
 if latest_backtest:
+    if latest_backtest.bankrupt:
+        st.markdown(
+            "<div class='bankrupt-alert'>> ALERT: STRATEGY BANKRUPT</div>",
+            unsafe_allow_html=True,
+        )
+
     st.markdown(
         "<div class='terminal-panel'>"
         f"<p class='terminal-line'>> RUN: #{latest_backtest.id}</p>"
         f"<p class='terminal-line'>> PERIOD: {latest_backtest.start_date} / {latest_backtest.end_date}</p>"
         f"<p class='terminal-line'>> UPDATED: {latest_backtest.timestamp}</p>"
+        f"<p class='terminal-line'>> INITIAL_CAPITAL: {format_num(latest_backtest.initial_capital)}</p>"
         "</div>",
         unsafe_allow_html=True,
     )
 
     cols = st.columns(4)
-    cols[0].metric("TRADES", latest_backtest.total_trades)
-    cols[1].metric("WIN_RATE", format_pct(latest_backtest.win_rate))
-    cols[2].metric("AVG_RETURN", format_pct(latest_backtest.average_return))
-    cols[3].metric("SPY_RETURN", format_pct(latest_backtest.spy_return))
+    cols[0].metric("STRATEGY_RETURN", format_pct(latest_backtest.total_return))
+    cols[1].metric("CAGR", format_pct(latest_backtest.cagr))
+    cols[2].metric("SHARPE", format_num(latest_backtest.sharpe))
+    cols[3].metric("SORTINO", format_num(latest_backtest.sortino))
+
+    cols = st.columns(4)
+    cols[0].metric("MAX_DRAWDOWN", format_pct(latest_backtest.max_drawdown))
+    cols[1].metric("CALMAR", format_num(latest_backtest.calmar))
+    cols[2].metric("AVG_HOLDING_DAYS", format_num(latest_backtest.avg_holding_days))
+    cols[3].metric("MAX_CONCURRENT_POSITIONS", latest_backtest.max_concurrent_positions or 0)
+
+    cols = st.columns(4)
+    cols[0].metric("TRADES_CLOSED", latest_backtest.total_trades)
+    cols[1].metric("SIGNALS_GENERATED", latest_backtest.generated_signals or 0)
+    cols[2].metric("TRADES_REJECTED", latest_backtest.rejected_trades or 0)
+    cols[3].metric("WIN_RATE", format_pct(latest_backtest.win_rate))
 
     cols = st.columns(4)
     cols[0].metric("PROFIT_FACTOR", format_num(latest_backtest.profit_factor))
     cols[1].metric("EXPECTANCY", format_pct(latest_backtest.expectancy))
-    cols[2].metric("AVG_WIN", format_pct(latest_backtest.average_win))
-    cols[3].metric("MAX_DRAWDOWN", format_pct(latest_backtest.max_drawdown))
+    cols[2].metric("BENCHMARK_RETURN", format_pct(latest_backtest.benchmark_return or latest_backtest.spy_return))
+    cols[3].metric("ALPHA_VS_SPY", format_pct(latest_backtest.alpha_vs_spy))
+
+    equity_rows = (
+        session.query(BacktestEquityCurve)
+        .filter(BacktestEquityCurve.run_id == latest_backtest.id)
+        .order_by(BacktestEquityCurve.date.asc())
+        .all()
+    )
+    if equity_rows:
+        equity_df = pd.DataFrame(
+            [
+                {
+                    "DATE": row.date,
+                    "EQUITY": row.equity,
+                    "DRAWDOWN_%": row.drawdown_pct,
+                    "CASH": row.cash,
+                    "OPEN_POSITIONS": row.open_positions,
+                    "DAILY_RETURN_%": row.daily_return,
+                }
+                for row in equity_rows
+            ]
+        )
+        chart_df = equity_df.set_index("DATE")[["EQUITY"]]
+        st.markdown("## EQUITY CURVE")
+        st.line_chart(chart_df, use_container_width=True)
+
+        st.markdown("## DRAWDOWN CURVE")
+        st.line_chart(equity_df.set_index("DATE")[["DRAWDOWN_%"]], use_container_width=True)
+
+        monthly = equity_df.copy()
+        monthly["DATE"] = pd.to_datetime(monthly["DATE"])
+        monthly["MONTH"] = monthly["DATE"].dt.to_period("M").astype(str)
+        monthly_returns = (
+            monthly.groupby("MONTH")["EQUITY"]
+            .agg(["first", "last"])
+            .assign(RETURN_PCT=lambda df: (df["last"] / df["first"] - 1) * 100)
+            .reset_index()[["MONTH", "RETURN_PCT"]]
+        )
+        st.markdown("## MONTHLY RETURNS")
+        st.dataframe(monthly_returns, use_container_width=True, hide_index=True)
 
     trades = (
         session.query(BacktestTrade)
@@ -251,6 +337,7 @@ if latest_backtest:
         .all()
     )
     if trades:
+        st.markdown("## CLOSED TRADES")
         trades_df = pd.DataFrame(
             [
                 {
@@ -261,12 +348,37 @@ if latest_backtest:
                     "EXIT": t.exit_date,
                     "REASON": t.exit_reason,
                     "RET_%": round(t.return_pct, 2),
+                    "PNL": round(t.pnl, 2),
+                    "HOLD": t.holding_days,
                     "SCORE": round(t.final_score, 2),
                 }
                 for t in trades
             ]
         )
         st.dataframe(trades_df, use_container_width=True, hide_index=True)
+
+    rejected = (
+        session.query(BacktestRejectedTrade)
+        .filter(BacktestRejectedTrade.run_id == latest_backtest.id)
+        .order_by(BacktestRejectedTrade.signal_date.desc())
+        .limit(80)
+        .all()
+    )
+    if rejected:
+        st.markdown("## REJECTED TRADES")
+        rejected_df = pd.DataFrame(
+            [
+                {
+                    "SIG_DATE": row.signal_date,
+                    "TICKER": row.ticker,
+                    "ACTION": row.action,
+                    "REASON": row.reason,
+                    "SCORE": round(row.final_score, 2) if row.final_score is not None else None,
+                }
+                for row in rejected
+            ]
+        )
+        st.dataframe(rejected_df, use_container_width=True, hide_index=True)
 else:
     st.markdown(
         "<div class='terminal-panel'><p class='terminal-line'>> BACKTEST: EMPTY</p></div>",
