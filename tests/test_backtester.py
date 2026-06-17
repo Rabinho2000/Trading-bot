@@ -187,6 +187,45 @@ def test_entry_zone_rejects_gap_above_zone(monkeypatch):
     assert result["rejected_trades"][0]["reason"] == "ENTRY_GAP_ABOVE_ZONE"
 
 
+def test_entry_zone_rejects_not_reached(monkeypatch):
+    dates = pd.to_datetime(["2020-01-01", "2020-01-02"])
+    abc = pd.DataFrame(
+        {
+            "Open": [100.0, 95.0],
+            "High": [101.0, 96.0],
+            "Low": [99.0, 94.0],
+            "Close": [100.0, 95.0],
+            "Volume": [1000, 1000],
+        },
+        index=dates,
+    )
+
+    monkeypatch.setattr(backtester, "has_complete_signal_data", lambda _df: True)
+    monkeypatch.setattr(backtester, "classify_market_regime", lambda _market: "RISK_ON")
+    monkeypatch.setattr(
+        backtester,
+        "generate_engine_signals",
+        lambda _engine, ticker, _df, _regime, as_of_date, _config, **_kwargs: [{
+            "signal_id": "not-reached",
+            "date": "2020-01-01",
+            "ticker": "ABC",
+            "action": "BUY",
+            "entry_zone": {"min": 99.0, "max": 101.0},
+            "invalidation": 90.0,
+            "target_1": 110.0,
+            "risk_rating": "LOW",
+            "technical_score": 0.8,
+            "regime_score": 1.2,
+            "final_score": 0.96,
+        }] if ticker == "ABC" and as_of_date == dates[0] else [],
+    )
+
+    result = simulate_portfolio({"ABC": abc, "SPY": abc.copy(), "QQQ": abc.copy()}, dates[0], dates[-1], BacktestConfig())
+
+    assert result["trades"] == []
+    assert result["rejected_trades"][0]["reason"] == "ENTRY_NOT_REACHED"
+
+
 def test_risk_based_position_sizing_caps_shares(monkeypatch):
     dates = pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"])
     abc = pd.DataFrame(
@@ -238,6 +277,58 @@ def test_risk_based_position_sizing_caps_shares(monkeypatch):
     assert trade["position_size"] == 10.0
     assert trade["risk_amount"] == 100.0
     assert trade["risk_pct"] == 1.0
+
+
+def test_position_sizing_respects_total_and_ticker_exposure(monkeypatch):
+    dates = pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"])
+    abc = pd.DataFrame(
+        {
+            "Open": [100.0, 100.0, 100.0],
+            "High": [101.0, 101.0, 110.0],
+            "Low": [99.0, 99.0, 99.0],
+            "Close": [100.0, 100.0, 110.0],
+            "Volume": [1000, 1000, 1000],
+        },
+        index=dates,
+    )
+
+    monkeypatch.setattr(backtester, "has_complete_signal_data", lambda _df: True)
+    monkeypatch.setattr(backtester, "classify_market_regime", lambda _market: "RISK_ON")
+    monkeypatch.setattr(
+        backtester,
+        "generate_engine_signals",
+        lambda _engine, ticker, _df, _regime, as_of_date, _config, **_kwargs: [{
+            "signal_id": "exposure",
+            "date": "2020-01-01",
+            "ticker": "ABC",
+            "action": "BUY",
+            "entry_zone": {"min": 99.0, "max": 101.0},
+            "invalidation": 50.0,
+            "target_1": 110.0,
+            "risk_rating": "LOW",
+            "technical_score": 0.8,
+            "regime_score": 1.2,
+            "final_score": 0.96,
+        }] if ticker == "ABC" and as_of_date == dates[0] else [],
+    )
+
+    result = simulate_portfolio(
+        {"ABC": abc, "SPY": abc.copy(), "QQQ": abc.copy()},
+        dates[0],
+        dates[-1],
+        BacktestConfig(
+            initial_capital=10000,
+            max_position_pct=1.0,
+            max_exposure_per_ticker=0.05,
+            max_total_exposure=0.30,
+            max_risk_per_trade=1.0,
+            spread_slippage_pct=0.0,
+        ),
+    )
+
+    trade = result["trades"][0]
+    assert trade["entry_value"] == 500.0
+    assert trade["position_size"] == 5.0
 
 
 def test_generate_signal_as_of_date_ignores_future_rows():

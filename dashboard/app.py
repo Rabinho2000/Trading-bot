@@ -13,6 +13,8 @@ from db.database import (
     BacktestRejectedTrade,
     BacktestRun,
     BacktestTrade,
+    OptimizationResult,
+    OptimizationRun,
     Run,
     Signal,
     get_session,
@@ -21,6 +23,7 @@ from db.database import (
 from main import run_analysis
 from strategy.backtester import run_backtest, run_parameter_sweep, run_walk_forward
 from strategy.engines import ETF_ROTATION_UNIVERSE
+from strategy.optimizer import ROBUST_SCORE_FORMULA, build_parameter_grid, run_optimization
 from strategy.diagnostics import build_diagnostics
 
 
@@ -199,7 +202,21 @@ if st.sidebar.button("RUN SIGNALS", use_container_width=True):
             st.sidebar.error(f"SIGNAL SCAN FAILED: {exc}")
 
 st.sidebar.markdown("## BACKTEST CONTROL")
-bt_engine = st.sidebar.selectbox("ENGINE", ["SIGNAL_ENGINE", "ETF_ROTATION_ENGINE", "RELATIVE_STRENGTH_STOCK_ENGINE"])
+ENGINE_OPTIONS = [
+    "SIGNAL_ENGINE",
+    "ETF_ROTATION_ENGINE",
+    "ETF_ROTATION_TOP_N_ENGINE",
+    "INDEX_TREND_BASELINE_ENGINE",
+    "RELATIVE_STRENGTH_STOCK_ENGINE",
+    "RELATIVE_STRENGTH_STOCK_ENGINE_V2",
+    "BREAKOUT_52W_ENGINE",
+    "PULLBACK_TREND_ENGINE",
+    "LOW_VOL_DEFENSIVE_ENGINE",
+    "MEAN_REVERSION_ETF_ENGINE",
+    "PAIR_RELATIVE_RATIO_ENGINE",
+]
+
+bt_engine = st.sidebar.selectbox("ENGINE", ENGINE_OPTIONS)
 bt_universe = st.sidebar.selectbox("UNIVERSE", ["DEFAULT", "ETF_ONLY"])
 bt_start = st.sidebar.date_input("START", value=date(2015, 1, 1))
 bt_end = st.sidebar.date_input("END", value=date(2025, 12, 31))
@@ -217,7 +234,7 @@ bt_rebalance = st.sidebar.selectbox("REBALANCE", ["weekly", "monthly"])
 bt_risk_backtest = st.sidebar.multiselect("BACKTEST_RISK", ["LOW", "MEDIUM", "HIGH"], default=["LOW", "MEDIUM", "HIGH"])
 
 def selected_watchlist():
-    if bt_universe == "ETF_ONLY" or bt_engine == "ETF_ROTATION_ENGINE":
+    if bt_universe == "ETF_ONLY" or bt_engine in {"ETF_ROTATION_ENGINE", "ETF_ROTATION_TOP_N_ENGINE", "LOW_VOL_DEFENSIVE_ENGINE", "MEAN_REVERSION_ETF_ENGINE", "PAIR_RELATIVE_RATIO_ENGINE", "INDEX_TREND_BASELINE_ENGINE"}:
         return ETF_ROTATION_UNIVERSE
     return None
 
@@ -304,6 +321,83 @@ if st.sidebar.button("RUN WALK_FORWARD", use_container_width=True):
         except Exception as exc:
             st.sidebar.error(f"WALK_FORWARD FAILED: {exc}")
 
+st.sidebar.markdown("## OPTIMIZER")
+opt_engine = st.sidebar.selectbox("OPT_ENGINE", ENGINE_OPTIONS, index=ENGINE_OPTIONS.index(bt_engine))
+opt_universe = st.sidebar.selectbox("OPT_UNIVERSE", ["DEFAULT", "ETF_ONLY"])
+opt_benchmark = st.sidebar.selectbox("OPT_BENCHMARK", ["SPY", "QQQ"])
+opt_adjusted = st.sidebar.checkbox("OPT_ADJUSTED_DATA", value=bt_adjusted)
+opt_start = st.sidebar.date_input("OPT_START", value=bt_start)
+opt_end = st.sidebar.date_input("OPT_END", value=bt_end)
+opt_mode = st.sidebar.selectbox("OPT_MODE", ["single_period", "walk_forward"])
+opt_confirm_large = st.sidebar.checkbox("CONFIRM >500 COMBOS", value=False)
+
+opt_min_score_start = st.sidebar.number_input("MIN_SCORE_START", 0.0, 1.0, 0.70, 0.01)
+opt_min_score_end = st.sidebar.number_input("MIN_SCORE_END", 0.0, 1.0, 0.90, 0.01)
+opt_min_score_step = st.sidebar.number_input("MIN_SCORE_STEP", 0.01, 0.50, 0.05, 0.01)
+opt_hold_start = st.sidebar.number_input("HOLD_START", 1, 252, 10, 1)
+opt_hold_end = st.sidebar.number_input("HOLD_END", 1, 252, 60, 1)
+opt_hold_step = st.sidebar.number_input("HOLD_STEP", 1, 252, 10, 1)
+opt_max_positions = st.sidebar.multiselect("OPT_MAX_POSITIONS", [1, 2, 3, 5, 8, 10], default=[3, 5])
+opt_position_pct = st.sidebar.multiselect("OPT_MAX_POS_PCT", [0.05, 0.10, 0.20, 0.30], default=[0.10, 0.20])
+opt_total_exposure = st.sidebar.multiselect("OPT_MAX_EXPOSURE", [0.30, 0.50, 1.00], default=[0.30, 0.50])
+opt_top_n = st.sidebar.multiselect("OPT_TOP_N", [1, 2, 3, 5], default=[2, 3])
+opt_rebalance = st.sidebar.multiselect("OPT_REBALANCE", ["weekly", "monthly"], default=["weekly"])
+opt_slippage = st.sidebar.multiselect("OPT_SLIPPAGE", [0.0, 0.001, 0.002], default=[0.001])
+opt_fx = st.sidebar.multiselect("OPT_FX", [0.0, 0.001, 0.002], default=[0.0])
+opt_sma_filter = st.sidebar.multiselect("OPT_SMA200", [True, False], default=[True])
+opt_vol_penalty = st.sidebar.multiselect("OPT_VOL_PENALTY", [0.5, 1.0, 2.0], default=[1.0])
+
+def optimizer_watchlist():
+    if opt_universe == "ETF_ONLY" or opt_engine in {"ETF_ROTATION_TOP_N_ENGINE", "LOW_VOL_DEFENSIVE_ENGINE", "MEAN_REVERSION_ETF_ENGINE", "PAIR_RELATIVE_RATIO_ENGINE", "INDEX_TREND_BASELINE_ENGINE"}:
+        return ETF_ROTATION_UNIVERSE
+    return None
+
+def optimizer_param_ranges():
+    return {
+        "min_score": {"start": opt_min_score_start, "end": opt_min_score_end, "step": opt_min_score_step},
+        "max_holding_days": {"start": int(opt_hold_start), "end": int(opt_hold_end), "step": int(opt_hold_step)},
+        "max_positions_total": {"values": opt_max_positions or [5]},
+        "max_position_pct": {"values": opt_position_pct or [0.20]},
+        "max_total_exposure": {"values": opt_total_exposure or [0.30]},
+        "top_n": {"values": opt_top_n or [3]},
+        "rebalance_frequency": {"values": opt_rebalance or ["weekly"]},
+        "spread_slippage_pct": {"values": opt_slippage or [0.001]},
+        "currency_conversion_pct": {"values": opt_fx or [0.0]},
+        "use_sma200_filter": {"values": opt_sma_filter or [True]},
+        "volatility_penalty_weight": {"values": opt_vol_penalty or [1.0]},
+    }
+
+if st.sidebar.button("PREVIEW COMBINATIONS", use_container_width=True):
+    ranges = optimizer_param_ranges()
+    grid = build_parameter_grid(ranges)
+    st.session_state["optimizer_preview"] = {"count": len(grid), "ranges": ranges}
+    st.sidebar.info(f"{len(grid)} COMBINATIONS")
+
+if st.sidebar.button("RUN OPTIMIZATION", use_container_width=True):
+    if opt_start >= opt_end and opt_mode == "single_period":
+        st.sidebar.error("OPT_START must be before OPT_END")
+    else:
+        with st.spinner("RUNNING OPTIMIZATION..."):
+            try:
+                outcome = run_optimization(
+                    opt_start.strftime("%Y-%m-%d"),
+                    opt_end.strftime("%Y-%m-%d"),
+                    optimizer_param_ranges(),
+                    strategy_engine=opt_engine,
+                    watchlist=optimizer_watchlist(),
+                    optimization_mode=opt_mode,
+                    confirm_large_grid=opt_confirm_large,
+                    initial_capital=float(bt_initial_capital),
+                    allowed_risk_ratings=bt_risk_backtest,
+                    use_adjusted_data=opt_adjusted,
+                    benchmark_ticker=opt_benchmark,
+                )
+                st.session_state["optimizer_results"] = outcome["results"]
+                st.sidebar.success(f"OPT RUN #{outcome['optimization_run_id']} COMPLETE")
+                st.rerun()
+            except Exception as exc:
+                st.sidebar.error(f"OPTIMIZATION FAILED: {exc}")
+
 latest_run = session.query(Run).order_by(Run.timestamp.desc()).first()
 latest_backtest = session.query(BacktestRun).order_by(BacktestRun.timestamp.desc()).first()
 trades_df = pd.DataFrame()
@@ -323,6 +417,124 @@ if "walk_forward_rows" in st.session_state:
     st.dataframe(wf_df, use_container_width=True, hide_index=True)
     if not wf_df.empty:
         st.bar_chart(wf_df.set_index("segment")[["cagr", "sharpe", "calmar", "max_drawdown"]], use_container_width=True)
+
+if "optimizer_preview" in st.session_state:
+    st.markdown("## OPTIMIZER PREVIEW")
+    st.markdown(
+        "<div class='terminal-panel'>"
+        f"<p class='terminal-line'>> COMBINATIONS: {st.session_state['optimizer_preview']['count']}</p>"
+        f"<p class='terminal-line'>> ROBUST_SCORE: {ROBUST_SCORE_FORMULA}</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+latest_optimization = session.query(OptimizationRun).order_by(OptimizationRun.timestamp.desc()).first()
+optimizer_rows = st.session_state.get("optimizer_results")
+if optimizer_rows is None and latest_optimization:
+    db_rows = (
+        session.query(OptimizationResult)
+        .filter(OptimizationResult.optimization_run_id == latest_optimization.id)
+        .order_by(OptimizationResult.rank_robust_score.asc())
+        .all()
+    )
+    optimizer_rows = [
+        {
+            "rank_robust_score": row.rank_robust_score,
+            "rank_total_return": row.rank_total_return,
+            "rank_cagr": row.rank_cagr,
+            "rank_sharpe": row.rank_sharpe,
+            "rank_calmar": row.rank_calmar,
+            "strategy_engine": latest_optimization.strategy_engine,
+            "parameters": row.parameters_json,
+            "total_return": row.total_return,
+            "cagr": row.cagr,
+            "sharpe": row.sharpe,
+            "calmar": row.calmar,
+            "max_drawdown": row.max_drawdown,
+            "alpha_vs_spy": row.alpha_vs_spy,
+            "robust_score": row.robust_score,
+            "overfit_risk": row.overfit_risk,
+            "run_id": row.backtest_run_id,
+            "total_trades": row.total_trades,
+            "beats_spy": row.total_return > row.benchmark_return,
+        }
+        for row in db_rows
+    ]
+
+if optimizer_rows:
+    st.markdown("## OPTIMIZER")
+    opt_df = pd.DataFrame(optimizer_rows)
+    if "parameters" in opt_df:
+        opt_df["parameters"] = opt_df["parameters"].astype(str)
+    min_trades_filter = st.number_input("OPT_FILTER_MIN_TRADES", min_value=0, value=0, step=1)
+    max_drawdown_filter = st.number_input("OPT_FILTER_MAX_DRAWDOWN", min_value=-100.0, max_value=0.0, value=-100.0, step=1.0)
+    beats_spy_filter = st.checkbox("OPT_FILTER_BEATS_SPY_ONLY", value=False)
+    no_overfit_filter = st.checkbox("OPT_FILTER_OVERFIT_FALSE_ONLY", value=False)
+    filtered = opt_df.copy()
+    if "total_trades" in filtered:
+        filtered = filtered[filtered["total_trades"].fillna(0) >= min_trades_filter]
+    if "max_drawdown" in filtered:
+        filtered = filtered[filtered["max_drawdown"].fillna(0) >= max_drawdown_filter]
+    if beats_spy_filter and "beats_spy" in filtered:
+        filtered = filtered[filtered["beats_spy"] == True]
+    if no_overfit_filter and "overfit_risk" in filtered:
+        filtered = filtered[filtered["overfit_risk"] == False]
+
+    def overfit_style(row):
+        if row.get("overfit_risk") is True:
+            return ["background-color: rgba(255, 77, 109, 0.22)"] * len(row)
+        return [""] * len(row)
+
+    display_columns = [
+        column for column in [
+            "rank_robust_score", "strategy_engine", "parameters", "total_return", "cagr",
+            "sharpe", "calmar", "max_drawdown", "alpha_vs_spy", "robust_score",
+            "overfit_risk", "run_id",
+        ] if column in filtered.columns
+    ]
+    st.dataframe(filtered[display_columns].style.apply(overfit_style, axis=1), use_container_width=True, hide_index=True)
+    st.download_button(
+        "EXPORT RESULTS CSV",
+        data=filtered.to_csv(index=False).encode("utf-8"),
+        file_name="optimization_results.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    if not filtered.empty:
+        cols = st.columns(6)
+        best_specs = [
+            ("BEST_RETURN", "total_return"),
+            ("BEST_CAGR", "cagr"),
+            ("BEST_SHARPE", "sharpe"),
+            ("BEST_CALMAR", "calmar"),
+            ("BEST_ROBUST", "robust_score"),
+            ("BEST_TEST", "test_cagr" if "test_cagr" in filtered.columns else "cagr"),
+        ]
+        for col, (label, metric) in zip(cols, best_specs):
+            row = filtered.sort_values(metric, ascending=False).iloc[0]
+            col.metric(label, f"{row.get(metric, 0.0):.2f}", f"RUN {row.get('run_id', 'N/A')}")
+
+        st.markdown("## OPTIMIZER CHARTS")
+        if {"cagr", "max_drawdown"}.issubset(filtered.columns):
+            st.scatter_chart(filtered, x="max_drawdown", y="cagr", color="robust_score", use_container_width=True)
+        if {"sharpe", "calmar"}.issubset(filtered.columns):
+            st.scatter_chart(filtered, x="sharpe", y="calmar", color="robust_score", use_container_width=True)
+        if {"robust_score", "run_id"}.issubset(filtered.columns):
+            top_robust = filtered.sort_values("robust_score", ascending=False).head(10)
+            st.bar_chart(top_robust.set_index("run_id")[["robust_score"]], use_container_width=True)
+        if "parameters" in filtered.columns and {"cagr"}.issubset(filtered.columns):
+            expanded = filtered.copy()
+            raw_params = opt_df.loc[expanded.index, "parameters"] if "parameters" in opt_df else None
+            if raw_params is not None:
+                try:
+                    param_df = pd.DataFrame([row.get("parameters_json", row.get("parameters", {})) if isinstance(row, dict) else {} for row in optimizer_rows])
+                    if {"min_score", "max_holding_days"}.issubset(param_df.columns):
+                        heat = pd.concat([param_df, opt_df[["cagr"]]], axis=1)
+                        heat = heat.pivot_table(index="min_score", columns="max_holding_days", values="cagr", aggfunc="mean")
+                        st.dataframe(heat, use_container_width=True)
+                except Exception:
+                    pass
 
 st.markdown("## SYSTEM")
 if latest_run:

@@ -172,6 +172,51 @@ class BacktestRejectedTrade(Base):
     final_score = Column(Float)
     run = relationship("BacktestRun", back_populates="rejected")
 
+class OptimizationRun(Base):
+    __tablename__ = 'optimization_runs'
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    strategy_engine = Column(String)
+    start_date = Column(String)
+    end_date = Column(String)
+    optimization_mode = Column(String)
+    parameter_ranges_json = Column(JSON)
+    total_combinations = Column(Integer, default=0)
+    completed_combinations = Column(Integer, default=0)
+    status = Column(String, default="PENDING")
+    notes = Column(String)
+    results = relationship("OptimizationResult", back_populates="optimization_run")
+
+class OptimizationResult(Base):
+    __tablename__ = 'optimization_results'
+    id = Column(Integer, primary_key=True)
+    optimization_run_id = Column(Integer, ForeignKey('optimization_runs.id'))
+    backtest_run_id = Column(Integer, ForeignKey('backtest_runs.id'), nullable=True)
+    rank_total_return = Column(Integer)
+    rank_cagr = Column(Integer)
+    rank_sharpe = Column(Integer)
+    rank_calmar = Column(Integer)
+    rank_robust_score = Column(Integer)
+    parameters_json = Column(JSON)
+    total_return = Column(Float, default=0.0)
+    cagr = Column(Float, default=0.0)
+    sharpe = Column(Float, default=0.0)
+    sortino = Column(Float, default=0.0)
+    calmar = Column(Float, default=0.0)
+    max_drawdown = Column(Float, default=0.0)
+    profit_factor = Column(Float, default=0.0)
+    expectancy = Column(Float, default=0.0)
+    win_rate = Column(Float, default=0.0)
+    total_trades = Column(Integer, default=0)
+    benchmark_return = Column(Float, default=0.0)
+    alpha_vs_spy = Column(Float, default=0.0)
+    robust_score = Column(Float, default=0.0)
+    overfit_risk = Column(Boolean, default=False)
+    train_metrics_json = Column(JSON)
+    validation_metrics_json = Column(JSON)
+    test_metrics_json = Column(JSON)
+    optimization_run = relationship("OptimizationRun", back_populates="results")
+
 def _add_column_if_missing(engine, table_name, column_name, column_sql):
     with engine.begin() as conn:
         existing = [row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table_name})").fetchall()]
@@ -237,6 +282,7 @@ def _migrate_sqlite_schema(engine):
         _add_column_if_missing(engine, "backtest_trades", column_name, column_sql)
     for column_name, column_sql in equity_columns.items():
         _add_column_if_missing(engine, "backtest_equity_curve", column_name, column_sql)
+    Base.metadata.create_all(engine)
 
 def init_db():
     from sqlalchemy import create_engine

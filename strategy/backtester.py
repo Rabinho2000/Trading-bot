@@ -15,7 +15,12 @@ from db.database import (
 )
 from strategy.indicators import calculate_indicators
 from strategy.regime import classify_market_regime
-from strategy.engines import ETF_ROTATION_UNIVERSE, generate_engine_signals
+from strategy.engines import (
+    ETF_ROTATION_UNIVERSE,
+    TARGET_POSITION_ENGINES,
+    generate_engine_signals,
+    generate_target_positions,
+)
 
 
 REQUIRED_SIGNAL_COLUMNS = [
@@ -55,6 +60,14 @@ class BacktestConfig:
     strategy_engine: str = "SIGNAL_ENGINE"
     rebalance_frequency: str = "weekly"
     segment_name: str = "full"
+    top_n: int = 3
+    use_sma200_filter: bool = True
+    volatility_penalty_weight: float = 1.0
+    rs_weight: float = 0.20
+    momentum_3m_weight: float = 0.25
+    momentum_6m_weight: float = 0.25
+    momentum_12m_weight: float = 0.20
+    strategy_params: dict | None = None
 
 
 @dataclass
@@ -225,6 +238,33 @@ def calculate_risk_metrics(equity_curve, initial_capital, start, end):
     }
 
 
+def calculate_exposure_metrics(trades, equity_curve, initial_capital):
+    if not equity_curve:
+        return {
+            "average_exposure": 0.0,
+            "time_in_market": 0.0,
+            "turnover": 0.0,
+            "cost_drag": 0.0,
+        }
+    exposures = []
+    in_market = []
+    for row in equity_curve:
+        equity = row.get("equity") or 0.0
+        positions_value = row.get("positions_value") or 0.0
+        exposures.append((positions_value / equity * 100) if equity > 0 else 0.0)
+        in_market.append(1 if positions_value > 0 else 0)
+    total_entry_value = sum(trade.get("entry_value", 0.0) or 0.0 for trade in trades)
+    total_cost = sum(trade.get("cost_amount", 0.0) or 0.0 for trade in trades)
+    avg_equity = sum(row.get("equity", 0.0) for row in equity_curve) / len(equity_curve)
+    denominator = avg_equity or initial_capital or 1.0
+    return {
+        "average_exposure": sum(exposures) / len(exposures),
+        "time_in_market": sum(in_market) / len(in_market) * 100,
+        "turnover": total_entry_value / denominator,
+        "cost_drag": total_cost / denominator * 100,
+    }
+
+
 def calculate_symbol_return(df, start, end):
     if df is None or df.empty:
         return 0.0
@@ -298,6 +338,83 @@ def close_position(position, raw_exit_price, exit_date, exit_reason, config_obj)
         "risk_pct": position["risk_pct"],
         "cost_amount": position["cost_amount"] + max((position["shares"] * raw_exit_price) - exit_value, 0.0),
     }
+
+
+def make_rebalance_position(ticker, current_date, raw_price, shares, entry_value, config_obj, regime):
+    return {
+        "signal_id": f"rebalance-{ticker}-{current_date.strftime('%Y%m%d')}",
+        "signal_date": current_date.strftime("%Y-%m-%d"),
+        "ticker": ticker,
+        "market_regime": regime,
+        "entry_date": current_date,
+        "entry_price": buy_price(raw_price, config_obj),
+        "entry_value": entry_value,
+        "shares": shares,
+        "invalidation": 0.0,
+        "target_1": float("inf"),
+        "technical_score": 0.0,
+        "regime_score": 0.0,
+        "final_score": 0.0,
+        "last_price": raw_price,
+        "df": None,
+        "risk_amount": 0.0,
+        "risk_pct": 0.0,
+        "cost_amount": max(entry_value - (shares * raw_price), 0.0),
+    }
+
+
+def rebalance_to_target_positions(target_positions, positions, cash, historical_data, current_date, config_obj, regime, equity):
+    target_positions = {
+        ticker: max(0.0, float(weight))
+        for ticker, weight in (target_positions or {}).items()
+        if float(weight) > 0
+    }
+    total_target = sum(target_positions.values())
+    if total_target > config_obj.max_total_exposure and total_target > 0:
+        scale = config_obj.max_total_exposure / total_target
+        target_positions = {ticker: weight * scale for ticker, weight in target_positions.items()}
+
+    trades = []
+    for ticker, position in list(positions.items()):
+        if ticker not in target_positions:
+            raw_exit = get_price(historical_data.get(ticker), current_date, "Close")
+            if raw_exit is None:
+                continue
+            trade = close_position(position, raw_exit, current_date, "REBALANCE_EXIT", config_obj)
+            trades.append(trade)
+            cash += trade["exit_value"]
+            del positions[ticker]
+
+    positions_value = mark_positions_value(positions, historical_data, current_date, config_obj)
+    equity = cash + positions_value
+    for ticker, target_weight in target_positions.items():
+        df = historical_data.get(ticker)
+        raw_price = get_price(df, current_date, "Close")
+        if raw_price is None:
+            continue
+        target_value = equity * min(target_weight, config_obj.max_position_pct, config_obj.max_exposure_per_ticker)
+        current_value = 0.0
+        if ticker in positions:
+            current_value = positions[ticker]["shares"] * sell_price(raw_price, config_obj)
+        buy_value = min(max(target_value - current_value, 0.0), cash)
+        exec_price = buy_price(raw_price, config_obj)
+        shares = buy_value / exec_price if exec_price > 0 else 0.0
+        if shares <= 0:
+            continue
+        if ticker in positions:
+            position = positions[ticker]
+            position["shares"] += shares
+            position["entry_value"] += buy_value
+            position["entry_price"] = position["entry_value"] / position["shares"]
+            position["cost_amount"] += max(buy_value - (shares * raw_price), 0.0)
+            position["last_price"] = raw_price
+        else:
+            position = make_rebalance_position(ticker, current_date, raw_price, shares, buy_value, config_obj, regime)
+            position["df"] = df
+            positions[ticker] = position
+        cash -= buy_value
+
+    return positions, cash, trades
 
 
 def process_entries_for_date(pending_entries, positions, cash, equity, historical_data, current_date, config_obj):
@@ -502,15 +619,16 @@ def simulate_portfolio(historical_data, start, end, config_obj):
         )
         rejected_trades.extend(entry_rejections)
 
-        closed_today, positions, cash_delta = process_exits_for_date(
-            positions,
-            historical_data,
-            current_date,
-            config_obj,
-            config_obj.max_holding_days,
-        )
-        trades.extend(closed_today)
-        cash += cash_delta
+        if config_obj.strategy_engine not in TARGET_POSITION_ENGINES:
+            closed_today, positions, cash_delta = process_exits_for_date(
+                positions,
+                historical_data,
+                current_date,
+                config_obj,
+                config_obj.max_holding_days,
+            )
+            trades.extend(closed_today)
+            cash += cash_delta
 
         equity_point, previous_equity, peak_equity = build_equity_point(
             current_date,
@@ -537,6 +655,31 @@ def simulate_portfolio(historical_data, start, end, config_obj):
             continue
 
         regime = classify_market_regime(scoped_market)
+
+        if config_obj.strategy_engine in TARGET_POSITION_ENGINES:
+            target_positions = generate_target_positions(
+                config_obj.strategy_engine,
+                historical_data,
+                regime,
+                current_date,
+                config_obj,
+                trading_dates,
+            )
+            if target_positions is not None:
+                positions, cash, rebalance_trades = rebalance_to_target_positions(
+                    target_positions,
+                    positions,
+                    cash,
+                    historical_data,
+                    current_date,
+                    config_obj,
+                    regime,
+                    previous_equity,
+                )
+                trades.extend(rebalance_trades)
+                max_concurrent_positions = max(max_concurrent_positions, len(positions))
+            continue
+
         pending_tickers = {entry["signal"]["ticker"] for entry in pending_entries}
         for ticker, df in historical_data.items():
             scoped_df = df.loc[:current_date]
@@ -637,10 +780,12 @@ def calculate_metrics(
     qqq_return = calculate_symbol_return(historical_data.get("QQQ"), start, end)
     benchmark_return = calculate_symbol_return(historical_data.get(benchmark_ticker), start, end)
     spy_sma200_return = calculate_sma200_strategy_return(historical_data.get("SPY"), start, end)
+    exposure_stats = calculate_exposure_metrics(trades, equity_curve, initial_capital)
 
     return {
         **trade_stats,
         **risk_stats,
+        **exposure_stats,
         "generated_signals": generated_signals,
         "rejected_trades": len(rejected_trades),
         "spy_return": spy_return,
@@ -648,6 +793,8 @@ def calculate_metrics(
         "spy_sma200_return": spy_sma200_return,
         "benchmark_return": benchmark_return,
         "alpha_vs_spy": risk_stats["total_return"] - spy_return,
+        "beats_spy": risk_stats["total_return"] > spy_return,
+        "beats_qqq": risk_stats["total_return"] > qqq_return,
         "bankrupt": bool(equity_curve and equity_curve[-1]["equity"] <= 0),
     }
 
@@ -672,6 +819,14 @@ def run_backtest(
     strategy_engine="SIGNAL_ENGINE",
     rebalance_frequency="weekly",
     segment_name="full",
+    top_n=3,
+    use_sma200_filter=True,
+    volatility_penalty_weight=1.0,
+    rs_weight=0.20,
+    momentum_3m_weight=0.25,
+    momentum_6m_weight=0.25,
+    momentum_12m_weight=0.20,
+    **strategy_params,
 ):
     init_db()
     config_obj = BacktestConfig(
@@ -691,8 +846,16 @@ def run_backtest(
         strategy_engine=strategy_engine,
         rebalance_frequency=rebalance_frequency,
         segment_name=segment_name,
+        top_n=int(top_n),
+        use_sma200_filter=bool(use_sma200_filter),
+        volatility_penalty_weight=float(volatility_penalty_weight),
+        rs_weight=float(rs_weight),
+        momentum_3m_weight=float(momentum_3m_weight),
+        momentum_6m_weight=float(momentum_6m_weight),
+        momentum_12m_weight=float(momentum_12m_weight),
+        strategy_params=strategy_params,
     )
-    if watchlist is None and strategy_engine == "ETF_ROTATION_ENGINE":
+    if watchlist is None and strategy_engine in {"ETF_ROTATION_ENGINE", "ETF_ROTATION_TOP_N_ENGINE"}:
         watchlist = ETF_ROTATION_UNIVERSE
     watchlist = list(watchlist or config.DEFAULT_WATCHLIST)
     if "SPY" not in watchlist:
