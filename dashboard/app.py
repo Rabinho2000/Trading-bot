@@ -19,7 +19,8 @@ from db.database import (
     init_db,
 )
 from main import run_analysis
-from strategy.backtester import run_backtest
+from strategy.backtester import run_backtest, run_parameter_sweep, run_walk_forward
+from strategy.engines import ETF_ROTATION_UNIVERSE
 from strategy.diagnostics import build_diagnostics
 
 
@@ -198,14 +199,27 @@ if st.sidebar.button("RUN SIGNALS", use_container_width=True):
             st.sidebar.error(f"SIGNAL SCAN FAILED: {exc}")
 
 st.sidebar.markdown("## BACKTEST CONTROL")
+bt_engine = st.sidebar.selectbox("ENGINE", ["SIGNAL_ENGINE", "ETF_ROTATION_ENGINE", "RELATIVE_STRENGTH_STOCK_ENGINE"])
+bt_universe = st.sidebar.selectbox("UNIVERSE", ["DEFAULT", "ETF_ONLY"])
 bt_start = st.sidebar.date_input("START", value=date(2015, 1, 1))
 bt_end = st.sidebar.date_input("END", value=date(2025, 12, 31))
 bt_initial_capital = st.sidebar.number_input("CAPITAL", min_value=100.0, value=10000.0, step=500.0)
+bt_min_score = st.sidebar.number_input("MIN_SCORE", min_value=0.0, max_value=1.0, value=0.75, step=0.01)
 bt_max_days = st.sidebar.number_input("MAX_HOLD", min_value=1, max_value=252, value=30, step=1)
 bt_max_positions = st.sidebar.number_input("MAX_POSITIONS", min_value=1, max_value=50, value=5, step=1)
 bt_position_pct = st.sidebar.number_input("MAX_POS_PCT", min_value=0.01, max_value=1.0, value=0.20, step=0.01)
+bt_max_total_exposure = st.sidebar.number_input("MAX_TOTAL_EXPOSURE", min_value=0.01, max_value=1.0, value=0.30, step=0.01)
 bt_slippage = st.sidebar.number_input("SPREAD_SLIPPAGE", min_value=0.0, max_value=0.10, value=0.001, step=0.001, format="%.4f")
 bt_fx = st.sidebar.number_input("FX_COST", min_value=0.0, max_value=0.10, value=0.0, step=0.001, format="%.4f")
+bt_benchmark = st.sidebar.selectbox("BENCHMARK", ["SPY", "QQQ"])
+bt_adjusted = st.sidebar.checkbox("ADJUSTED_DATA", value=False)
+bt_rebalance = st.sidebar.selectbox("REBALANCE", ["weekly", "monthly"])
+bt_risk_backtest = st.sidebar.multiselect("BACKTEST_RISK", ["LOW", "MEDIUM", "HIGH"], default=["LOW", "MEDIUM", "HIGH"])
+
+def selected_watchlist():
+    if bt_universe == "ETF_ONLY" or bt_engine == "ETF_ROTATION_ENGINE":
+        return ETF_ROTATION_UNIVERSE
+    return None
 
 if st.sidebar.button("RUN BACKTEST", use_container_width=True):
     if bt_start >= bt_end:
@@ -220,8 +234,18 @@ if st.sidebar.button("RUN BACKTEST", use_container_width=True):
                     initial_capital=float(bt_initial_capital),
                     max_positions_total=int(bt_max_positions),
                     max_position_pct=float(bt_position_pct),
+                    min_score=float(bt_min_score),
+                    allowed_risk_ratings=bt_risk_backtest,
+                    max_total_exposure=float(bt_max_total_exposure),
                     spread_slippage_pct=float(bt_slippage),
                     currency_conversion_pct=float(bt_fx),
+                    use_adjusted_data=bt_adjusted,
+                    benchmark_ticker=bt_benchmark,
+                    strategy_name=bt_engine,
+                    strategy_version=f"ui_{bt_min_score:.2f}",
+                    strategy_engine=bt_engine,
+                    rebalance_frequency=bt_rebalance,
+                    watchlist=selected_watchlist(),
                 )
                 st.sidebar.success(f"RUN #{result.run_id} SAVED")
                 if result.failed_tickers:
@@ -231,11 +255,74 @@ if st.sidebar.button("RUN BACKTEST", use_container_width=True):
             except Exception as exc:
                 st.sidebar.error(f"BACKTEST FAILED: {exc}")
 
+if st.sidebar.button("RUN SWEEP", use_container_width=True):
+    with st.spinner("RUNNING PARAMETER SWEEP..."):
+        try:
+            rows = run_parameter_sweep(
+                bt_start.strftime("%Y-%m-%d"),
+                bt_end.strftime("%Y-%m-%d"),
+                watchlist=selected_watchlist(),
+                strategy_engine=bt_engine,
+                initial_capital=float(bt_initial_capital),
+                max_positions_total=int(bt_max_positions),
+                max_position_pct=float(bt_position_pct),
+                allowed_risk_ratings=bt_risk_backtest,
+                max_total_exposure=float(bt_max_total_exposure),
+                spread_slippage_pct=float(bt_slippage),
+                currency_conversion_pct=float(bt_fx),
+                use_adjusted_data=bt_adjusted,
+                benchmark_ticker=bt_benchmark,
+                rebalance_frequency=bt_rebalance,
+            )
+            st.session_state["sweep_rows"] = rows
+            st.sidebar.success("SWEEP COMPLETE")
+            st.rerun()
+        except Exception as exc:
+            st.sidebar.error(f"SWEEP FAILED: {exc}")
+
+if st.sidebar.button("RUN WALK_FORWARD", use_container_width=True):
+    with st.spinner("RUNNING WALK-FORWARD..."):
+        try:
+            rows = run_walk_forward(
+                watchlist=selected_watchlist(),
+                strategy_engine=bt_engine,
+                initial_capital=float(bt_initial_capital),
+                max_positions_total=int(bt_max_positions),
+                max_position_pct=float(bt_position_pct),
+                min_score=float(bt_min_score),
+                allowed_risk_ratings=bt_risk_backtest,
+                max_total_exposure=float(bt_max_total_exposure),
+                spread_slippage_pct=float(bt_slippage),
+                currency_conversion_pct=float(bt_fx),
+                use_adjusted_data=bt_adjusted,
+                benchmark_ticker=bt_benchmark,
+                rebalance_frequency=bt_rebalance,
+            )
+            st.session_state["walk_forward_rows"] = rows
+            st.sidebar.success("WALK_FORWARD COMPLETE")
+            st.rerun()
+        except Exception as exc:
+            st.sidebar.error(f"WALK_FORWARD FAILED: {exc}")
+
 latest_run = session.query(Run).order_by(Run.timestamp.desc()).first()
 latest_backtest = session.query(BacktestRun).order_by(BacktestRun.timestamp.desc()).first()
 trades_df = pd.DataFrame()
 equity_df = pd.DataFrame()
 rejected_df = pd.DataFrame()
+
+if "sweep_rows" in st.session_state:
+    st.markdown("## PARAMETER SWEEP")
+    sweep_df = pd.DataFrame(st.session_state["sweep_rows"])
+    st.dataframe(sweep_df, use_container_width=True, hide_index=True)
+    if not sweep_df.empty:
+        st.bar_chart(sweep_df.set_index("run_id")[["cagr", "sharpe", "calmar", "max_drawdown"]], use_container_width=True)
+
+if "walk_forward_rows" in st.session_state:
+    st.markdown("## WALK_FORWARD")
+    wf_df = pd.DataFrame(st.session_state["walk_forward_rows"])
+    st.dataframe(wf_df, use_container_width=True, hide_index=True)
+    if not wf_df.empty:
+        st.bar_chart(wf_df.set_index("segment")[["cagr", "sharpe", "calmar", "max_drawdown"]], use_container_width=True)
 
 st.markdown("## SYSTEM")
 if latest_run:
@@ -263,6 +350,8 @@ if latest_backtest:
     st.markdown(
         "<div class='terminal-panel'>"
         f"<p class='terminal-line'>> RUN: #{latest_backtest.id}</p>"
+        f"<p class='terminal-line'>> ENGINE: {latest_backtest.strategy_engine}</p>"
+        f"<p class='terminal-line'>> MIN_SCORE: {format_num(latest_backtest.min_score)}</p>"
         f"<p class='terminal-line'>> PERIOD: {latest_backtest.start_date} / {latest_backtest.end_date}</p>"
         f"<p class='terminal-line'>> UPDATED: {latest_backtest.timestamp}</p>"
         f"<p class='terminal-line'>> INITIAL_CAPITAL: {format_num(latest_backtest.initial_capital)}</p>"
@@ -294,6 +383,11 @@ if latest_backtest:
     cols[2].metric("BENCHMARK_RETURN", format_pct(latest_backtest.benchmark_return or latest_backtest.spy_return))
     cols[3].metric("ALPHA_VS_SPY", format_pct(latest_backtest.alpha_vs_spy))
 
+    cols = st.columns(3)
+    cols[0].metric("SPY_RETURN", format_pct(latest_backtest.spy_return))
+    cols[1].metric("QQQ_RETURN", format_pct(latest_backtest.qqq_return))
+    cols[2].metric("SPY_SMA200_RETURN", format_pct(latest_backtest.spy_sma200_return))
+
     equity_rows = (
         session.query(BacktestEquityCurve)
         .filter(BacktestEquityCurve.run_id == latest_backtest.id)
@@ -308,8 +402,12 @@ if latest_backtest:
                     "EQUITY": row.equity,
                     "DRAWDOWN_%": row.drawdown_pct,
                     "CASH": row.cash,
+                    "POSITIONS_VALUE": row.positions_value,
                     "OPEN_POSITIONS": row.open_positions,
                     "DAILY_RETURN_%": row.daily_return,
+                    "BENCHMARK_DAILY_RETURN_%": row.benchmark_daily_return,
+                    "SPY_DAILY_RETURN_%": row.spy_daily_return,
+                    "QQQ_DAILY_RETURN_%": row.qqq_daily_return,
                 }
                 for row in equity_rows
             ]
@@ -356,6 +454,9 @@ if latest_backtest:
                     "SCORE": round(t.final_score, 2),
                     "ENTRY_VALUE": t.entry_value,
                     "EXIT_VALUE": t.exit_value,
+                    "RISK_AMOUNT": t.risk_amount,
+                    "RISK_%": t.risk_pct,
+                    "COST": t.cost_amount,
                 }
                 for t in trades
             ]
@@ -405,8 +506,12 @@ if latest_backtest:
                 "EQUITY": "equity",
                 "DRAWDOWN_%": "drawdown_pct",
                 "CASH": "cash",
+                "POSITIONS_VALUE": "positions_value",
                 "OPEN_POSITIONS": "open_positions",
                 "DAILY_RETURN_%": "daily_return",
+                "BENCHMARK_DAILY_RETURN_%": "benchmark_daily_return",
+                "SPY_DAILY_RETURN_%": "spy_daily_return",
+                "QQQ_DAILY_RETURN_%": "qqq_daily_return",
             }
         )
         if "positions_value" not in diagnostic_equity and equity_rows:
@@ -418,6 +523,11 @@ if latest_backtest:
                 "ACTION": "action",
                 "REASON": "reason",
                 "SCORE": "final_score",
+                "ENTRY_VALUE": "entry_value",
+                "EXIT_VALUE": "exit_value",
+                "RISK_AMOUNT": "risk_amount",
+                "RISK_%": "risk_pct",
+                "COST": "cost_amount",
             }
         )
         diagnostics = build_diagnostics(diagnostic_trades, diagnostic_equity, diagnostic_rejected)
@@ -436,12 +546,20 @@ if latest_backtest:
         )
 
         exposure = diagnostics["exposure"]
+        efficiency = diagnostics["efficiency"]
         cols = st.columns(5)
         cols[0].metric("AVG_EXPOSURE", format_pct(exposure["average_portfolio_exposure"]))
         cols[1].metric("MAX_EXPOSURE", format_pct(exposure["max_exposure"]))
         cols[2].metric("AVG_CASH", format_pct(exposure["average_cash_pct"]))
         cols[3].metric("TIME_IN_MARKET", format_pct(exposure["time_in_market"]))
         cols[4].metric("AVG_OPEN_POS", format_num(exposure["average_open_positions"]))
+
+        cols = st.columns(5)
+        cols[0].metric("TURNOVER", format_num(efficiency["turnover"]))
+        cols[1].metric("COST_DRAG", format_pct(efficiency["cost_drag"]))
+        cols[2].metric("BETA_VS_SPY", format_num(efficiency["beta_vs_spy"]))
+        cols[3].metric("CORR_VS_SPY", format_num(efficiency["correlation_vs_spy"]))
+        cols[4].metric("INFO_RATIO", format_num(efficiency["information_ratio"]))
 
         st.markdown("## PERFORMANCE BY TICKER")
         by_ticker = diagnostics["by_ticker"]
@@ -466,6 +584,12 @@ if latest_backtest:
         st.dataframe(by_exit, use_container_width=True, hide_index=True)
         if not by_exit.empty:
             st.bar_chart(by_exit.set_index("reason")[["total_pnl", "expectancy", "rejected"]], use_container_width=True)
+
+        st.markdown("## REJECTED TRADES BY REASON")
+        by_rejection = diagnostics["by_rejection_reason"]
+        st.dataframe(by_rejection, use_container_width=True, hide_index=True)
+        if not by_rejection.empty:
+            st.bar_chart(by_rejection.set_index("reason")[["rejected"]], use_container_width=True)
 
         st.markdown("## PERFORMANCE BY SCORE BUCKET")
         by_score = diagnostics["by_score_bucket"]

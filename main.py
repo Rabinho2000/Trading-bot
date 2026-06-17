@@ -153,6 +153,12 @@ def main():
     parser.add_argument("--max-position-pct", type=float, default=0.20, help="Maximum capital fraction per position")
     parser.add_argument("--spread-slippage-pct", type=float, default=0.001, help="Per-side spread/slippage fraction")
     parser.add_argument("--currency-conversion-pct", type=float, default=0.0, help="Per-side currency conversion fraction")
+    parser.add_argument("--strategy-engine", default="SIGNAL_ENGINE", choices=["SIGNAL_ENGINE", "ETF_ROTATION_ENGINE", "RELATIVE_STRENGTH_STOCK_ENGINE"])
+    parser.add_argument("--min-score", type=float, default=0.75)
+    parser.add_argument("--allowed-risk-ratings", default="LOW,MEDIUM,HIGH")
+    parser.add_argument("--max-total-exposure", type=float, default=config.MAX_TOTAL_EXPOSURE)
+    parser.add_argument("--use-adjusted-data", action="store_true")
+    parser.add_argument("--benchmark-ticker", default="SPY")
     
     args = parser.parse_args()
     
@@ -178,6 +184,14 @@ def main():
             max_position_pct=args.max_position_pct,
             spread_slippage_pct=args.spread_slippage_pct,
             currency_conversion_pct=args.currency_conversion_pct,
+            strategy_engine=args.strategy_engine,
+            strategy_name=args.strategy_engine,
+            strategy_version=f"cli_{args.min_score:.2f}",
+            min_score=args.min_score,
+            allowed_risk_ratings=args.allowed_risk_ratings,
+            max_total_exposure=args.max_total_exposure,
+            use_adjusted_data=args.use_adjusted_data,
+            benchmark_ticker=args.benchmark_ticker,
         )
         metrics = result.metrics
         print(f"Backtest run #{result.run_id} saved.")

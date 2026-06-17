@@ -152,7 +152,7 @@ def performance_by_year(trades_df):
 
 
 def normalize_rejection_reason(reason):
-    if reason in {"NO_NEXT_OPEN_WITHIN_BACKTEST_WINDOW", "MISSING_NEXT_OPEN"}:
+    if reason in {"NO_NEXT_OPEN_WITHIN_BACKTEST_WINDOW", "MISSING_NEXT_OPEN", "ENTRY_NOT_REACHED", "ENTRY_GAP_ABOVE_ZONE"}:
         return "ENTRY_ZONE_MISSED"
     return "RISK_REJECTED"
 
@@ -220,6 +220,45 @@ def exposure_diagnostics(equity_df):
         "average_cash_pct": cash_pct.mean(),
         "time_in_market": (equity_df["open_positions"].gt(0).mean() * 100),
         "average_open_positions": equity_df["open_positions"].mean(),
+    }
+
+
+def rejection_reason_summary(rejected_df):
+    if rejected_df is None or rejected_df.empty:
+        return pd.DataFrame(columns=["reason", "rejected"])
+    return rejected_df.groupby("reason").size().reset_index(name="rejected").sort_values("rejected", ascending=False)
+
+
+def portfolio_efficiency_diagnostics(trades_df, equity_df):
+    turnover = 0.0
+    cost_drag = 0.0
+    beta = 0.0
+    correlation = 0.0
+    information_ratio = 0.0
+
+    if not trades_df.empty and not equity_df.empty and "entry_value" in trades_df:
+        avg_equity = equity_df["equity"].mean()
+        total_entry_value = trades_df["entry_value"].fillna(0).sum()
+        turnover = total_entry_value / avg_equity if avg_equity else 0.0
+        if "cost_amount" in trades_df:
+            cost_drag = trades_df["cost_amount"].fillna(0).sum() / avg_equity * 100 if avg_equity else 0.0
+
+    if not equity_df.empty and "benchmark_daily_return" in equity_df:
+        strategy_returns = equity_df["daily_return"].fillna(0) / 100
+        benchmark_returns = equity_df["benchmark_daily_return"].fillna(0) / 100
+        if len(strategy_returns) > 2 and benchmark_returns.var() > 0:
+            beta = strategy_returns.cov(benchmark_returns) / benchmark_returns.var()
+            correlation = strategy_returns.corr(benchmark_returns)
+            active_returns = strategy_returns - benchmark_returns
+            tracking_error = active_returns.std(ddof=0)
+            information_ratio = (active_returns.mean() / tracking_error) * math.sqrt(252) if tracking_error else 0.0
+
+    return {
+        "turnover": turnover,
+        "cost_drag": cost_drag,
+        "beta_vs_spy": 0.0 if pd.isna(beta) else beta,
+        "correlation_vs_spy": 0.0 if pd.isna(correlation) else correlation,
+        "information_ratio": 0.0 if pd.isna(information_ratio) else information_ratio,
     }
 
 
@@ -313,7 +352,9 @@ def build_diagnostics(trades_df, equity_df, rejected_df=None):
         "by_regime": summarize_trades(trades_df, "market_regime", REGIME_ORDER),
         "by_year": performance_by_year(trades_df),
         "by_exit_reason": performance_by_exit_reason(trades_df, rejected_df),
+        "by_rejection_reason": rejection_reason_summary(rejected_df),
         "by_score_bucket": summarize_trades(bucketed, "score_bucket", SCORE_LABELS),
         "exposure": exposure_diagnostics(equity_df),
+        "efficiency": portfolio_efficiency_diagnostics(trades_df, equity_df),
         "recommendations": generate_recommendations(trades_df),
     }

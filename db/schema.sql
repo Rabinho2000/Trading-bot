@@ -62,6 +62,17 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     start_date TEXT,
     end_date TEXT,
     watchlist TEXT,
+    strategy_name TEXT,
+    strategy_version TEXT,
+    strategy_engine TEXT,
+    benchmark_ticker TEXT,
+    min_score REAL,
+    allowed_risk_ratings TEXT,
+    max_total_exposure REAL,
+    use_adjusted_data INTEGER,
+    rebalance_frequency TEXT,
+    segment_name TEXT,
+    overfit_risk INTEGER,
     initial_capital REAL,
     final_equity REAL,
     total_return REAL,
@@ -81,6 +92,8 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     max_drawdown REAL,
     max_drawdown_value REAL,
     spy_return REAL,
+    qqq_return REAL,
+    spy_sma200_return REAL,
     benchmark_return REAL,
     alpha_vs_spy REAL,
     avg_holding_days REAL,
@@ -113,6 +126,9 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     position_size REAL,
     entry_value REAL,
     exit_value REAL,
+    risk_amount REAL,
+    risk_pct REAL,
+    cost_amount REAL,
     FOREIGN KEY(run_id) REFERENCES backtest_runs(id)
 );
 
@@ -127,6 +143,9 @@ CREATE TABLE IF NOT EXISTS backtest_equity_curve (
     drawdown_pct REAL,
     open_positions INTEGER,
     daily_return REAL,
+    benchmark_daily_return REAL,
+    spy_daily_return REAL,
+    qqq_daily_return REAL,
     FOREIGN KEY(run_id) REFERENCES backtest_runs(id)
 );
 

@@ -2,7 +2,7 @@ import hashlib
 from datetime import datetime
 from .scoring import calculate_technical_score, calculate_final_score
 
-def generate_signal(ticker, df, regime, as_of_date=None):
+def generate_signal(ticker, df, regime, as_of_date=None, strategy_name="SIGNAL_ENGINE", strategy_version="1.0"):
     if df is None or df.empty:
         return None
     
@@ -59,12 +59,14 @@ def generate_signal(ticker, df, regime, as_of_date=None):
         risk_rating = "MEDIUM"
 
     # Deterministic ID based on stable signal identity, not the score.
-    signal_id = hashlib.md5(f"{date_str}_{ticker}_{action}".encode()).hexdigest()[:12]
+    signal_id = hashlib.md5(f"{strategy_name}_{strategy_version}_{date_str}_{ticker}_{action}".encode()).hexdigest()[:12]
 
     return {
         "signal_id": signal_id,
         "date": date_str,
         "ticker": ticker,
+        "strategy_name": strategy_name,
+        "strategy_version": strategy_version,
         "action": action,
         "entry_zone": {"min": round(entry_min, 2), "max": round(entry_max, 2)},
         "invalidation": round(invalidation, 2),

@@ -71,6 +71,17 @@ class BacktestRun(Base):
     start_date = Column(String)
     end_date = Column(String)
     watchlist = Column(String)
+    strategy_name = Column(String, default="SIGNAL_ENGINE")
+    strategy_version = Column(String, default="1.0")
+    strategy_engine = Column(String, default="SIGNAL_ENGINE")
+    benchmark_ticker = Column(String, default="SPY")
+    min_score = Column(Float, default=0.75)
+    allowed_risk_ratings = Column(String, default="LOW,MEDIUM,HIGH")
+    max_total_exposure = Column(Float, default=0.30)
+    use_adjusted_data = Column(Boolean, default=False)
+    rebalance_frequency = Column(String, default="weekly")
+    segment_name = Column(String, default="full")
+    overfit_risk = Column(Boolean, default=False)
     initial_capital = Column(Float, default=10000.0)
     final_equity = Column(Float, default=0.0)
     total_return = Column(Float, default=0.0)
@@ -90,6 +101,8 @@ class BacktestRun(Base):
     max_drawdown = Column(Float, default=0.0)
     max_drawdown_value = Column(Float, default=0.0)
     spy_return = Column(Float, default=0.0)
+    qqq_return = Column(Float, default=0.0)
+    spy_sma200_return = Column(Float, default=0.0)
     benchmark_return = Column(Float, default=0.0)
     alpha_vs_spy = Column(Float, default=0.0)
     avg_holding_days = Column(Float, default=0.0)
@@ -125,6 +138,9 @@ class BacktestTrade(Base):
     position_size = Column(Float)
     entry_value = Column(Float)
     exit_value = Column(Float)
+    risk_amount = Column(Float)
+    risk_pct = Column(Float)
+    cost_amount = Column(Float)
     run = relationship("BacktestRun", back_populates="trades")
 
 class BacktestEquityCurve(Base):
@@ -139,6 +155,9 @@ class BacktestEquityCurve(Base):
     drawdown_pct = Column(Float)
     open_positions = Column(Integer)
     daily_return = Column(Float)
+    benchmark_daily_return = Column(Float, default=0.0)
+    spy_daily_return = Column(Float, default=0.0)
+    qqq_daily_return = Column(Float, default=0.0)
     run = relationship("BacktestRun", back_populates="equity_points")
 
 class BacktestRejectedTrade(Base):
@@ -183,18 +202,41 @@ def _migrate_sqlite_schema(engine):
         "spread_slippage_pct": "REAL DEFAULT 0.0",
         "currency_conversion_pct": "REAL DEFAULT 0.0",
         "bankrupt": "BOOLEAN DEFAULT 0",
+        "strategy_name": "TEXT DEFAULT 'SIGNAL_ENGINE'",
+        "strategy_version": "TEXT DEFAULT '1.0'",
+        "strategy_engine": "TEXT DEFAULT 'SIGNAL_ENGINE'",
+        "benchmark_ticker": "TEXT DEFAULT 'SPY'",
+        "min_score": "REAL DEFAULT 0.75",
+        "allowed_risk_ratings": "TEXT DEFAULT 'LOW,MEDIUM,HIGH'",
+        "max_total_exposure": "REAL DEFAULT 0.30",
+        "use_adjusted_data": "BOOLEAN DEFAULT 0",
+        "rebalance_frequency": "TEXT DEFAULT 'weekly'",
+        "segment_name": "TEXT DEFAULT 'full'",
+        "overfit_risk": "BOOLEAN DEFAULT 0",
+        "qqq_return": "REAL DEFAULT 0.0",
+        "spy_sma200_return": "REAL DEFAULT 0.0",
     }
     trade_columns = {
         "holding_days": "INTEGER",
         "position_size": "REAL",
         "entry_value": "REAL",
         "exit_value": "REAL",
+        "risk_amount": "REAL",
+        "risk_pct": "REAL",
+        "cost_amount": "REAL",
+    }
+    equity_columns = {
+        "benchmark_daily_return": "REAL DEFAULT 0.0",
+        "spy_daily_return": "REAL DEFAULT 0.0",
+        "qqq_daily_return": "REAL DEFAULT 0.0",
     }
 
     for column_name, column_sql in run_columns.items():
         _add_column_if_missing(engine, "backtest_runs", column_name, column_sql)
     for column_name, column_sql in trade_columns.items():
         _add_column_if_missing(engine, "backtest_trades", column_name, column_sql)
+    for column_name, column_sql in equity_columns.items():
+        _add_column_if_missing(engine, "backtest_equity_curve", column_name, column_sql)
 
 def init_db():
     from sqlalchemy import create_engine
